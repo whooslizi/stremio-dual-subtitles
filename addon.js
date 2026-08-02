@@ -213,9 +213,10 @@ const manifest = {
 
 const builder = new addonBuilder(manifest);
 
-async function fetchWithRetry(url, options = {}, retries = 2, backoffMs = 500) {
+async function fetchWithRetry(url, options = {}, retries = 1, backoffMs = 200) {
   try {
     return await axios.get(url, {
+      timeout: 5000,
       headers: {
         'User-Agent': 'Stremio Dual Subtitles Addon/1.0.0 (https://stremio-addons.net)'
       },
@@ -301,7 +302,7 @@ async function fetchSubtitleContent(url, languageCode = null) {
   try {
     const response = await fetchWithRetry(url, {
       responseType: 'arraybuffer',
-      timeout: 15000,
+      timeout: 4000,
       maxContentLength: 5 * 1024 * 1024 // 5MB limit
     });
 
@@ -1006,8 +1007,9 @@ async function subtitlesHandler({ type, id, extra, config }) {
 // Register the handler with the builder
 builder.defineSubtitlesHandler(subtitlesHandler);
 
-
- // Generate merged subtitle dynamically (for serverless environments)
+/**
+ * Generate merged subtitle dynamically (for serverless environments)
+ */
 async function generateDynamicSubtitle(
   type,
   imdbId,
@@ -1048,9 +1050,9 @@ async function generateDynamicSubtitle(
       normalizedVideoParams
     );
 
-    if (!allSubtitles) {
+    if (!allSubtitles || allSubtitles.length === 0) {
       debugServer.warn('No subtitles found');
-      return null;
+      return '1\n00:00:00,000 --> 00:00:01,000\n \n';
     }
 
     const candidatePairs = generateCandidatePairs(allSubtitles, mainLang, transLang);
@@ -1117,10 +1119,11 @@ async function generateDynamicSubtitle(
       }
     }
 
-    return null;
+    // Ultimate fallback if no subtitle files could be parsed
+    return '1\n00:00:00,000 --> 00:00:01,000\n \n';
   } catch (error) {
     debugServer.error('Error generating dynamic subtitle:', sanitizeForLogging(error.message));
-    return null;
+    return '1\n00:00:00,000 --> 00:00:01,000\n \n';
   }
 }
 
