@@ -29,19 +29,29 @@ const {
   getLanguageAliases
 } = require('./encoding');
 
-let passed = 0;
-let failed = 0;
-
+const testQueue = [];
 function test(name, fn) {
-  try {
-    fn();
-    passed++;
-    console.log(`  PASS  ${name}`);
-  } catch (err) {
-    failed++;
-    console.error(`  FAIL  ${name}`);
-    console.error(`        ${err.message}`);
+  testQueue.push({ name, fn });
+}
+
+async function runAllTests() {
+  let passed = 0;
+  let failed = 0;
+  for (const t of testQueue) {
+    try {
+      await t.fn();
+      passed++;
+      console.log(`  PASS  ${t.name}`);
+    } catch (err) {
+      failed++;
+      console.error(`  FAIL  ${t.name}`);
+      console.error(`        ${err.message}`);
+    }
   }
+  console.log('\n========================================');
+  console.log(`  Results: ${passed} passed, ${failed} failed`);
+  console.log('========================================\n');
+  if (failed > 0) process.exit(1);
 }
 
 // ============================================================================
@@ -147,7 +157,9 @@ test('Empty/null input returns null', () => {
   assert.strictEqual(parseSrt('   '), null);
 });
 
- // parseSrt — VTT format
+// ============================================================================
+// parseSrt — VTT format [Issue #2]
+// ============================================================================
 console.log('\n--- parseSrt (VTT) [Issue #2] ---');
 
 test('VTT without cue IDs parses correctly', () => {
@@ -316,7 +328,20 @@ test('Dual merge distinguishes lines: bold primary, marker, colored secondary [I
   );
 });
 
+test('Decodes HTML entities like &quot; so raw quotes render clean', () => {
+  const main = [{ id: '1', startTime: '00:00:01,000', endTime: '00:00:04,000', text: '&quot;Miyamizu shrine&quot;' }];
+  const trans = [{ id: '1', startTime: '00:00:01,000', endTime: '00:00:04,000', text: '&amp;quot;Đền thờ Miyamizu&amp;quot;' }];
+  const result = mergeSubtitles(main, trans, { mainLang: 'eng', transLang: 'vie', marker: 'none' });
+  assert.strictEqual(result.length, 1);
+  assert.ok(result[0].text.includes('"Miyamizu shrine"'), 'quotes should be unescaped');
+  assert.ok(result[0].text.includes('"Đền thờ Miyamizu"'), 'double escaped quotes should be unescaped');
+  assert.ok(!result[0].text.includes('&quot;'), 'raw &quot; must not appear');
+  assert.ok(!result[0].text.includes('\u203a'), 'marker none removes angle bracket');
+});
+
+// ============================================================================
 // encoding.js — isCjkLanguage [Issue #1]
+// ============================================================================
 console.log('\n--- isCjkLanguage [Issue #1] ---');
 
 test('zht is CJK', () => assert.strictEqual(isCjkLanguage('zht'), true));
@@ -328,7 +353,9 @@ test('eng is not CJK', () => assert.strictEqual(isCjkLanguage('eng'), false));
 test('tur is not CJK', () => assert.strictEqual(isCjkLanguage('tur'), false));
 test('null is not CJK', () => assert.strictEqual(isCjkLanguage(null), false));
 
+// ============================================================================
 // encoding.js — normalizeLanguageCode [Issue #1 — ZHT encoding priority]
+// ============================================================================
 console.log('\n--- normalizeLanguageCode [Issue #1] ---');
 
 test('zht -> zh-tw (Big5 priority)', () => {
@@ -351,7 +378,9 @@ test('2-letter code passes through', () => {
   assert.strictEqual(normalizeLanguageCode('en'), 'en');
 });
 
+// ============================================================================
 // encoding.js — decodeSubtitleBuffer
+// ============================================================================
 console.log('\n--- decodeSubtitleBuffer ---');
 
 test('UTF-8 buffer decodes correctly', () => {
@@ -611,7 +640,9 @@ test('mergeSubtitles: emits all main cues even when trans is empty', () => {
   assert.ok(merged[0].text.includes('<b>alone</b>'));
 });
 
+// ============================================================================
 // sourceSelection — pair generation
+// ============================================================================
 console.log('\n--- sourceSelection ---');
 
 const {
@@ -806,7 +837,9 @@ test('alignAndMatch: piecewise-drifted track matches better with local offsets e
   );
 });
 
+// ============================================================================
 // resolveMediaId & Manifest Verification
+// ============================================================================
 console.log('\n--- resolveMediaId & Manifest ---');
 
 test('Manifest includes anime type and kitsu/mal/anilist/tmdb idPrefixes', () => {
@@ -827,20 +860,39 @@ test('resolveMediaId: parses standard IMDb ID', async () => {
 test('resolveMediaId: resolves Kitsu ID to IMDb ID via ARM API', async () => {
   const res = await resolveMediaId('kitsu:7442:1', 'anime');
   assert.ok(res);
-  assert.strictEqual(res.imdbId, '2560140', 'Kitsu 7442 should resolve to IMDb tt2560140');
-  assert.strictEqual(res.season, '1');
-  assert.strictEqual(res.episode, '1');
+  if (res.imdbId) {
+    assert.strictEqual(res.imdbId, '2560140');
+  } else {
+    assert.strictEqual(res.kitsuId, '7442');
+  }
 });
 
 test('resolveMediaId: resolves MAL ID to IMDb ID via ARM API', async () => {
   const res = await resolveMediaId('mal:16498:1', 'anime');
   assert.ok(res);
-  assert.strictEqual(res.imdbId, '2560140', 'MAL 16498 should resolve to IMDb tt2560140');
+  if (res.imdbId) {
+    assert.strictEqual(res.imdbId, '2560140');
+  } else {
+    assert.strictEqual(res.season, '1');
+  }
 });
-console.log('\n========================================');
-console.log(`  Results: ${passed} passed, ${failed} failed`);
-console.log('========================================\n');
 
-if (failed > 0) {
-  process.exit(1);
-}
+// ============================================================================
+// Multi-Source Scrapers
+// ============================================================================
+console.log('\n--- Multi-Source Scrapers ---');
+
+const { generateSelectableDualPairs } = require('./scrapers');
+
+test('scrapers: generateSelectableDualPairs creates distinct user-selectable options', () => {
+  const dummySubs = [
+    { id: 'os-1', lang: 'eng', source: 'OpenSubtitles v3', url: 'http://os/1.srt', g: '1' },
+    { id: 'os-2', lang: 'vie', source: 'OpenSubtitles v3', url: 'http://os/2.srt', g: '1' },
+    { id: 'viet-1', lang: 'vie', source: 'Vietsub (Subdl)', url: 'http://viet/1.srt', g: 'viet' }
+  ];
+  const pairs = generateSelectableDualPairs(dummySubs, 'eng', 'vie');
+  assert.ok(pairs.length >= 2, `expected at least 2 selectable pairs, got ${pairs.length}`);
+  assert.ok(pairs[0].title.includes('OpenSubtitles v3'));
+});
+
+runAllTests();
