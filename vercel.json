@@ -3,13 +3,13 @@
   "functions": {
     "api/index.js": {
       "includeFiles": [
-        "scrapers/**",
-        "lib/**",
-        "addon.js",
-        "server.js",
-        "encoding.js",
-        "languages.js",
-        "landingTemplate.js"
+        "../scrapers/**",
+        "../lib/**",
+        "../addon.js",
+        "../server.js",
+        "../encoding.js",
+        "../languages.js",
+        "../landingTemplate.js"
       ]
     }
   },
