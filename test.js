@@ -16,7 +16,8 @@ const {
     mergeSubtitles,
     joinSubtitleLines,
     formatSrt,
-    msToSrtTime
+    msToSrtTime,
+    resolveMediaId
   },
   manifest
 } = require('./addon');
@@ -146,9 +147,7 @@ test('Empty/null input returns null', () => {
   assert.strictEqual(parseSrt('   '), null);
 });
 
-// ============================================================================
-// parseSrt — VTT format [Issue #2]
-// ============================================================================
+ // parseSrt — VTT format
 console.log('\n--- parseSrt (VTT) [Issue #2] ---');
 
 test('VTT without cue IDs parses correctly', () => {
@@ -317,9 +316,7 @@ test('Dual merge distinguishes lines: bold primary, marker, colored secondary [I
   );
 });
 
-// ============================================================================
 // encoding.js — isCjkLanguage [Issue #1]
-// ============================================================================
 console.log('\n--- isCjkLanguage [Issue #1] ---');
 
 test('zht is CJK', () => assert.strictEqual(isCjkLanguage('zht'), true));
@@ -331,9 +328,7 @@ test('eng is not CJK', () => assert.strictEqual(isCjkLanguage('eng'), false));
 test('tur is not CJK', () => assert.strictEqual(isCjkLanguage('tur'), false));
 test('null is not CJK', () => assert.strictEqual(isCjkLanguage(null), false));
 
-// ============================================================================
 // encoding.js — normalizeLanguageCode [Issue #1 — ZHT encoding priority]
-// ============================================================================
 console.log('\n--- normalizeLanguageCode [Issue #1] ---');
 
 test('zht -> zh-tw (Big5 priority)', () => {
@@ -356,9 +351,7 @@ test('2-letter code passes through', () => {
   assert.strictEqual(normalizeLanguageCode('en'), 'en');
 });
 
-// ============================================================================
 // encoding.js — decodeSubtitleBuffer
-// ============================================================================
 console.log('\n--- decodeSubtitleBuffer ---');
 
 test('UTF-8 buffer decodes correctly', () => {
@@ -618,9 +611,7 @@ test('mergeSubtitles: emits all main cues even when trans is empty', () => {
   assert.ok(merged[0].text.includes('<b>alone</b>'));
 });
 
-// ============================================================================
 // sourceSelection — pair generation
-// ============================================================================
 console.log('\n--- sourceSelection ---');
 
 const {
@@ -815,9 +806,37 @@ test('alignAndMatch: piecewise-drifted track matches better with local offsets e
   );
 });
 
-// ============================================================================
-// RESULTS
-// ============================================================================
+// resolveMediaId & Manifest Verification
+console.log('\n--- resolveMediaId & Manifest ---');
+
+test('Manifest includes anime type and kitsu/mal/anilist/tmdb idPrefixes', () => {
+  assert.ok(manifest.types.includes('anime'), 'Manifest types must include anime');
+  assert.ok(manifest.idPrefixes.includes('kitsu'), 'Manifest idPrefixes must include kitsu');
+  assert.ok(manifest.idPrefixes.includes('mal'), 'Manifest idPrefixes must include mal');
+  assert.ok(manifest.idPrefixes.includes('anilist'), 'Manifest idPrefixes must include anilist');
+});
+
+test('resolveMediaId: parses standard IMDb ID', async () => {
+  const res = await resolveMediaId('tt2560140:1:1', 'series');
+  assert.ok(res);
+  assert.strictEqual(res.imdbId, '2560140');
+  assert.strictEqual(res.season, '1');
+  assert.strictEqual(res.episode, '1');
+});
+
+test('resolveMediaId: resolves Kitsu ID to IMDb ID via ARM API', async () => {
+  const res = await resolveMediaId('kitsu:7442:1', 'anime');
+  assert.ok(res);
+  assert.strictEqual(res.imdbId, '2560140', 'Kitsu 7442 should resolve to IMDb tt2560140');
+  assert.strictEqual(res.season, '1');
+  assert.strictEqual(res.episode, '1');
+});
+
+test('resolveMediaId: resolves MAL ID to IMDb ID via ARM API', async () => {
+  const res = await resolveMediaId('mal:16498:1', 'anime');
+  assert.ok(res);
+  assert.strictEqual(res.imdbId, '2560140', 'MAL 16498 should resolve to IMDb tt2560140');
+});
 console.log('\n========================================');
 console.log(`  Results: ${passed} passed, ${failed} failed`);
 console.log('========================================\n');
