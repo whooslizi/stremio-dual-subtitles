@@ -957,27 +957,19 @@ async function subtitlesHandler({ type, id, extra, config }) {
     debugServer.log(`Fetching subtitles for tt${imdbId} (${effectiveType} S:${season} E:${episode})...`);
     const allSubtitles = await fetchAllSubtitles(imdbId, effectiveType, season, episode, videoParams);
 
-    if (!allSubtitles || allSubtitles.length === 0) {
-      debugServer.warn('No subtitles found');
-      return { subtitles: [] };
+    const trackTitle = `Dual (${mainLang.toUpperCase()}+${transLang.toUpperCase()})`;
+    const trackSubtitleName = `${trackTitle} - ${getLanguageName(mainLang)} + ${getLanguageName(transLang)}`;
+
+    let mainSubId = 'auto';
+    let transSubId = 'auto';
+
+    if (allSubtitles && allSubtitles.length > 0) {
+      const candidatePairs = generateCandidatePairs(allSubtitles, mainLang, transLang);
+      if (candidatePairs && candidatePairs.length > 0) {
+        mainSubId = candidatePairs[0].main.id;
+        transSubId = candidatePairs[0].trans.id;
+      }
     }
-
-    debugServer.log(`Found ${allSubtitles.length} total subtitles`);
-
-    // Build the ordered list of (main, trans) candidates.
-    const candidatePairs = generateCandidatePairs(allSubtitles, mainLang, transLang);
-
-    if (candidatePairs.length === 0) {
-      debugServer.warn(`No ${mainLang}/${transLang} candidate pairs available`);
-      return { subtitles: [] };
-    }
-
-    debugServer.log(
-      `Built ${candidatePairs.length} candidate pair(s); ` +
-      `same-group: ${candidatePairs.filter(p => p.sameGroup).length}`
-    );
-
-    const best = candidatePairs[0];
 
     const dynamicParams = [
       effectiveType,
@@ -986,29 +978,23 @@ async function subtitlesHandler({ type, id, extra, config }) {
       episode || '0',
       mainLang,
       transLang,
-      best.main.id,
-      best.trans.id
+      mainSubId,
+      transSubId
     ].join('/');
 
-    const trackTitle = `Dual (${mainLang.toUpperCase()}+${transLang.toUpperCase()})`;
-    const trackSubtitleName = `${trackTitle} - ${getLanguageName(mainLang)} + ${getLanguageName(transLang)}`;
-
     const finalSubtitles = [{
-      id: `dual-${best.main.id}-${best.trans.id}`,
+      id: `dual-${mainLang}-${transLang}`,
       url: `{{ADDON_URL}}/subs/${dynamicParams}.srt${videoQuery ? `?${videoQuery}` : ''}`,
       lang: mainLang,
       name: trackTitle,
       SubtitlesName: trackSubtitleName
     }];
 
-    debugServer.log(
-      `Selected pair (no merge): main=${best.main.id} trans=${best.trans.id} ` +
-      `source=${best.source} sameGroup=${best.sameGroup}`
-    );
+    debugServer.log(`Publishing dual subtitle track: ${trackTitle}`);
 
     return {
       subtitles: finalSubtitles,
-      cacheMaxAge: 6 * 3600
+      cacheMaxAge: 3600
     };
 
   } catch (error) {
@@ -1020,9 +1006,8 @@ async function subtitlesHandler({ type, id, extra, config }) {
 // Register the handler with the builder
 builder.defineSubtitlesHandler(subtitlesHandler);
 
-/**
- * Generate merged subtitle dynamically (for serverless environments)
- */
+
+ // Generate merged subtitle dynamically (for serverless environments)
 async function generateDynamicSubtitle(
   type,
   imdbId,
@@ -1098,22 +1083,41 @@ async function generateDynamicSubtitle(
       );
     }
 
-    if (orderedPairs.length === 0) return null;
-
-    const best = await selectAndMergeBestPair(orderedPairs, mainLang, transLang);
-    if (!best || !best.merged || best.merged.length === 0) {
-      debugServer.warn('No usable merged subtitle from any pair');
-      return null;
+    if (orderedPairs.length > 0) {
+      const best = await selectAndMergeBestPair(orderedPairs, mainLang, transLang);
+      if (best && best.merged && best.merged.length > 0 && best.mergedSrt) {
+        const srtContent = best.mergedSrt;
+        debugServer.log(
+          `Generated ${best.merged.length} merged subtitle entries ` +
+          `(matchRate=${(best.matchRate * 100).toFixed(1)}%, attempts=${best.attempts})`
+        );
+        if (srtContent) storeSubtitle(cacheKey, srtContent);
+        return srtContent;
+      }
     }
 
-    const srtContent = best.mergedSrt;
-    debugServer.log(
-      `Generated ${best.merged.length} merged subtitle entries ` +
-      `(matchRate=${(best.matchRate * 100).toFixed(1)}%, attempts=${best.attempts})`
-    );
+    // Fallback: If no dual pair is available, return best available subtitle track
+    const mainList = filterByLanguage(allSubtitles, mainLang);
+    const transList = filterByLanguage(allSubtitles, transLang);
+    const fallbackSub = mainList[0] || transList[0] || allSubtitles[0];
 
-    if (srtContent) storeSubtitle(cacheKey, srtContent);
-    return srtContent;
+    if (fallbackSub) {
+      const subLang = mainList[0] ? mainLang : (transList[0] ? transLang : fallbackSub.lang);
+      const content = await fetchSubtitleContent(fallbackSub.url, subLang);
+      if (content) {
+        const parsed = parseSrt(content);
+        if (parsed && parsed.length > 0) {
+          const merged = mergeSubtitles(parsed, [], { mainLang: subLang });
+          const fallbackSrt = formatSrt(merged);
+          if (fallbackSrt) {
+            storeSubtitle(cacheKey, fallbackSrt);
+            return fallbackSrt;
+          }
+        }
+      }
+    }
+
+    return null;
   } catch (error) {
     debugServer.error('Error generating dynamic subtitle:', sanitizeForLogging(error.message));
     return null;
