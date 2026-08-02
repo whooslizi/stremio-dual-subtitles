@@ -1099,8 +1099,8 @@ async function generateDynamicSubtitle(
     }
 
     // Fallback: If no dual pair is available, return best available subtitle track
-    const mainList = filterByLanguage(allSubtitles, mainLang);
-    const transList = filterByLanguage(allSubtitles, transLang);
+    const mainList = filterByLanguage(allSubtitles, mainLang) || [];
+    const transList = filterByLanguage(allSubtitles, transLang) || [];
     const fallbackSub = mainList[0] || transList[0] || allSubtitles[0];
 
     if (fallbackSub) {
