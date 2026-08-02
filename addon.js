@@ -179,8 +179,8 @@ const manifest = {
   name: ADDON_NAME,
   description: 'Watch movies and series with dual subtitles - see two languages simultaneously for better language learning!',
   resources: ['subtitles'],
-  types: ['movie', 'series'],
-  idPrefixes: ['tt'],
+  types: ['movie', 'series', 'anime'],
+  idPrefixes: ['tt', 'kitsu', 'mal', 'anilist', 'tmdb'],
   catalogs: [],
   logo: '/logo.png',
   behaviorHints: {
@@ -215,7 +215,12 @@ const builder = new addonBuilder(manifest);
 
 async function fetchWithRetry(url, options = {}, retries = 2, backoffMs = 500) {
   try {
-    return await axios.get(url, options);
+    return await axios.get(url, {
+      headers: {
+        'User-Agent': 'Stremio Dual Subtitles Addon/1.0.0 (https://stremio-addons.net)'
+      },
+      ...options
+    });
   } catch (error) {
     const status = error && error.response ? error.response.status : null;
     if (retries > 0 && (status === 429 || status === 469 || status === 503 || status === 504)) {
@@ -230,7 +235,8 @@ async function fetchWithRetry(url, options = {}, retries = 2, backoffMs = 500) {
  * Fetch all subtitles from OpenSubtitles API.
  */
 async function fetchAllSubtitles(imdbId, type, season = null, episode = null, videoParams = {}) {
-  let apiUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/tt${imdbId}`;
+  const cleanImdb = String(imdbId || '').replace(/^tt/, '');
+  let apiUrl = `https://opensubtitles-v3.strem.io/subtitles/${type}/tt${cleanImdb}`;
 
   if (type === 'series' && season && episode) {
     apiUrl += `:${season}:${episode}`;
@@ -736,7 +742,7 @@ async function selectAndMergeBestPair(candidatePairs, mainLang, transLang) {
 
   if (best) {
     debugServer.log(
-      `Selected pair: main=${best.mainSub.id} trans=${best.transSub.id} ` +
+      `Selected pair: main=${best.mainSub.id} trans=${best.trans.id} ` +
       `matchRate=${(best.matchRate * 100).toFixed(1)}% attempts=${best.attempts} ` +
       `passedGate=${best.passedGate}`
     );
@@ -744,9 +750,169 @@ async function selectAndMergeBestPair(candidatePairs, mainLang, transLang) {
   return best;
 }
 
+/**
+ * In-memory cache for ARM (Anime Relations) mappings.
+ */
+const armCache = new Map();
+const ARM_CACHE_TTL = 24 * 60 * 60 * 1000; // 24 hours
+
+/**
+ * Fetch media mapping from ARM API (https://arm.haglund.dev) with fallback.
+ */
+async function fetchArmMapping(source, id) {
+  if (!id) return null;
+  const cacheKey = `${source}:${id}`;
+  const now = Date.now();
+  const cached = armCache.get(cacheKey);
+  if (cached && (now - cached.timestamp < ARM_CACHE_TTL)) {
+    return cached.data;
+  }
+
+  try {
+    const url = `https://arm.haglund.dev/api/v2/ids?source=${encodeURIComponent(source)}&id=${encodeURIComponent(id)}`;
+    const response = await fetchWithRetry(url, { timeout: 5000 });
+    if (response && response.data && response.data.imdb) {
+      armCache.set(cacheKey, { data: response.data, timestamp: now });
+      return response.data;
+    }
+  } catch (error) {
+    debugServer.warn(`ARM mapping failed for ${source}:${id}:`, sanitizeForLogging(error.message));
+  }
+
+  // Fallback for Kitsu: check Kitsu mappings API to find MAL ID, then try ARM for MAL ID
+  if (source === 'kitsu') {
+    try {
+      const kitsuUrl = `https://kitsu.io/api/edge/anime/${encodeURIComponent(id)}/mappings`;
+      const kitsuRes = await fetchWithRetry(kitsuUrl, { timeout: 5000 });
+      const mappings = kitsuRes?.data?.data || [];
+      const malMapping = mappings.find(m => m?.attributes?.externalSite === 'myanimelist/anime');
+      if (malMapping && malMapping.attributes?.externalId) {
+        const malId = malMapping.attributes.externalId;
+        const malData = await fetchArmMapping('myanimelist', malId);
+        if (malData && malData.imdb) {
+          armCache.set(cacheKey, { data: malData, timestamp: now });
+          return malData;
+        }
+      }
+    } catch (kitsuErr) {
+      debugServer.warn(`Kitsu fallback mapping failed for ${id}:`, sanitizeForLogging(kitsuErr.message));
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Resolves various Stremio media ID formats (tt1234567, kitsu:7442:1, mal:16498:1, anilist:16498:1)
+ * into a standardized IMDb ID, media type, season, and episode.
+ */
+async function resolveMediaId(id, type, extra = {}) {
+  if (!id || typeof id !== 'string') return null;
+
+  let season = extra?.season ? String(extra.season) : null;
+  let episode = extra?.episode ? String(extra.episode) : null;
+  let cleanId = extra?.imdbId || id;
+
+  // Kitsu IDs: kitsu:7442 or kitsu:7442:1
+  if (cleanId.startsWith('kitsu:')) {
+    const parts = cleanId.split(':');
+    const kitsuId = parts[1];
+    const episodeNum = parts[2] || episode || '1';
+
+    const mapped = await fetchArmMapping('kitsu', kitsuId);
+    if (mapped && mapped.imdb) {
+      const imdbId = String(mapped.imdb).replace(/^tt/, '');
+      const mappedSeason = mapped['thetvdb-season'] || mapped['themoviedb-season'] || 1;
+      return {
+        imdbId,
+        type: 'series',
+        season: season || String(mappedSeason),
+        episode: episode || String(episodeNum)
+      };
+    }
+    return {
+      imdbId: null,
+      kitsuId,
+      type: 'series',
+      season: season || '1',
+      episode: episode || String(episodeNum)
+    };
+  }
+
+  // MyAnimeList IDs: mal:16498 or mal:16498:1 or myanimelist:16498
+  if (cleanId.startsWith('mal:') || cleanId.startsWith('myanimelist:')) {
+    const parts = cleanId.split(':');
+    const malId = parts[1];
+    const episodeNum = parts[2] || episode || '1';
+
+    const mapped = await fetchArmMapping('myanimelist', malId);
+    if (mapped && mapped.imdb) {
+      const imdbId = String(mapped.imdb).replace(/^tt/, '');
+      const mappedSeason = mapped['thetvdb-season'] || mapped['themoviedb-season'] || 1;
+      return {
+        imdbId,
+        type: 'series',
+        season: season || String(mappedSeason),
+        episode: episode || String(episodeNum)
+      };
+    }
+    return {
+      imdbId: null,
+      type: 'series',
+      season: season || '1',
+      episode: episode || String(episodeNum)
+    };
+  }
+
+  // AniList IDs: anilist:16498 or anilist:16498:1
+  if (cleanId.startsWith('anilist:')) {
+    const parts = cleanId.split(':');
+    const anilistId = parts[1];
+    const episodeNum = parts[2] || episode || '1';
+
+    const mapped = await fetchArmMapping('anilist', anilistId);
+    if (mapped && mapped.imdb) {
+      const imdbId = String(mapped.imdb).replace(/^tt/, '');
+      const mappedSeason = mapped['thetvdb-season'] || mapped['themoviedb-season'] || 1;
+      return {
+        imdbId,
+        type: 'series',
+        season: season || String(mappedSeason),
+        episode: episode || String(episodeNum)
+      };
+    }
+    return {
+      imdbId: null,
+      type: 'series',
+      season: season || '1',
+      episode: episode || String(episodeNum)
+    };
+  }
+
+  // Standard IMDb ID: tt2560140 or tt2560140:1:1 or 2560140
+  if (cleanId.includes(':')) {
+    const parts = cleanId.split(':');
+    cleanId = parts[0];
+    if (parts.length >= 3) {
+      season = season || parts[1];
+      episode = episode || parts[2];
+    }
+  }
+
+  cleanId = String(cleanId).replace(/^tt/, '');
+  if (!cleanId) return null;
+
+  return {
+    imdbId: cleanId,
+    type,
+    season,
+    episode
+  };
+}
+
 // Subtitle handler function
 async function subtitlesHandler({ type, id, extra, config }) {
-  debugServer.log('Subtitle request:', sanitizeForLogging({ type, id }));
+  debugServer.log('Subtitle request:', sanitizeForLogging({ type, id, extra }));
 
   // Get configured languages
   const mainLangRaw = config?.mainLang || 'English [eng]';
@@ -763,24 +929,18 @@ async function subtitlesHandler({ type, id, extra, config }) {
     return { subtitles: [] };
   }
 
-  // Parse IMDB ID
-  let imdbId = extra?.imdbId || id;
-  let season = extra?.season;
-  let episode = extra?.episode;
-
-  if (imdbId.includes(':')) {
-    const parts = imdbId.split(':');
-    imdbId = parts[0];
-    if (parts.length >= 3) {
-      season = season || parts[1];
-      episode = episode || parts[2];
-    }
+  // Resolve media ID
+  const resolved = await resolveMediaId(id, type, extra);
+  if (!resolved || (!resolved.imdbId && !resolved.kitsuId)) {
+    debugServer.warn('Could not resolve media ID for:', id);
+    return { subtitles: [] };
   }
 
-  imdbId = imdbId.replace('tt', '');
+  const { imdbId, type: resolvedType, season, episode } = resolved;
+  const effectiveType = resolvedType || type || 'series';
 
   if (!imdbId) {
-    debugServer.warn('No valid IMDB ID');
+    debugServer.warn('No valid IMDB ID for media:', id);
     return { subtitles: [] };
   }
 
@@ -794,19 +954,17 @@ async function subtitlesHandler({ type, id, extra, config }) {
     const videoQuery = serializeVideoParams(videoParams);
 
     // Fetch all subtitles
-    debugServer.log('Fetching subtitles from OpenSubtitles...');
-    const allSubtitles = await fetchAllSubtitles(imdbId, type, season, episode, videoParams);
+    debugServer.log(`Fetching subtitles for tt${imdbId} (${effectiveType} S:${season} E:${episode})...`);
+    const allSubtitles = await fetchAllSubtitles(imdbId, effectiveType, season, episode, videoParams);
 
-    if (!allSubtitles) {
+    if (!allSubtitles || allSubtitles.length === 0) {
       debugServer.warn('No subtitles found');
       return { subtitles: [] };
     }
 
     debugServer.log(`Found ${allSubtitles.length} total subtitles`);
 
-    // Build the ordered list of (main, trans) candidates. Same-`g`
-    // (same release) pairs come first; this is our biggest single
-    // accuracy win on titles like Sopranos S01E03.
+    // Build the ordered list of (main, trans) candidates.
     const candidatePairs = generateCandidatePairs(allSubtitles, mainLang, transLang);
 
     if (candidatePairs.length === 0) {
@@ -819,15 +977,10 @@ async function subtitlesHandler({ type, id, extra, config }) {
       `same-group: ${candidatePairs.filter(p => p.sameGroup).length}`
     );
 
-    // CPU-cheap path: do NOT fetch / parse / merge here. Just publish
-    // the URL of the best-ranked pair. The actual download + alignment
-    // happens once, on demand, when Stremio fetches the .srt URL. This
-    // halves Vercel Active CPU per dual-subtitle request, since the old
-    // code ran the entire pipeline twice (once here for nothing).
     const best = candidatePairs[0];
 
     const dynamicParams = [
-      type,
+      effectiveType,
       imdbId,
       season || '0',
       episode || '0',
@@ -837,13 +990,15 @@ async function subtitlesHandler({ type, id, extra, config }) {
       best.trans.id
     ].join('/');
 
+    const trackTitle = `Dual (${mainLang.toUpperCase()}+${transLang.toUpperCase()})`;
+    const trackSubtitleName = `${trackTitle} - ${getLanguageName(mainLang)} + ${getLanguageName(transLang)}`;
+
     const finalSubtitles = [{
       id: `dual-${best.main.id}-${best.trans.id}`,
       url: `{{ADDON_URL}}/subs/${dynamicParams}.srt${videoQuery ? `?${videoQuery}` : ''}`,
       lang: mainLang,
-      SubtitlesName:
-        `Dual (${mainLang.toUpperCase()}+${transLang.toUpperCase()}) - ` +
-        `${getLanguageName(mainLang)} + ${getLanguageName(transLang)}`
+      name: trackTitle,
+      SubtitlesName: trackSubtitleName
     }];
 
     debugServer.log(
@@ -867,10 +1022,6 @@ builder.defineSubtitlesHandler(subtitlesHandler);
 
 /**
  * Generate merged subtitle dynamically (for serverless environments)
- * Called directly by URL. Results are cached in `subtitleCache` so any
- * repeat hit on the same Vercel instance skips fetch + parse + merge
- * entirely — even ahead of Vercel's edge cache (which ALSO caches via
- * Cache-Control headers in server.js routes).
  */
 async function generateDynamicSubtitle(
   type,
@@ -885,9 +1036,15 @@ async function generateDynamicSubtitle(
 ) {
   debugServer.log('Dynamic subtitle generation:', { type, imdbId, mainLang, transLang });
 
+  const resolved = await resolveMediaId(imdbId, type, { season, episode });
+  const cleanImdb = resolved?.imdbId || String(imdbId).replace(/^(tt|kitsu:|mal:|anilist:)/, '');
+  const effectiveType = resolved?.type || type || 'series';
+  const effectiveSeason = resolved?.season || season;
+  const effectiveEpisode = resolved?.episode || episode;
+
   const videoCacheFragment = serializeVideoParams(videoParams);
   const cacheKey =
-    `${imdbId}_${season || ''}_${episode || ''}` +
+    `${cleanImdb}_${effectiveSeason || ''}_${effectiveEpisode || ''}` +
     `_${mainLang}_${transLang}_${mainSubId}_${transSubId}` +
     `_${videoCacheFragment || ''}`;
   const cached = getSubtitle(cacheKey);
@@ -897,13 +1054,12 @@ async function generateDynamicSubtitle(
   }
 
   try {
-    // Fetch all subtitles
     const normalizedVideoParams = normalizeVideoParams(videoParams);
     const allSubtitles = await fetchAllSubtitles(
-      imdbId, 
-      type, 
-      season !== '0' ? season : null, 
-      episode !== '0' ? episode : null,
+      cleanImdb, 
+      effectiveType, 
+      effectiveSeason !== '0' ? effectiveSeason : null, 
+      effectiveEpisode !== '0' ? effectiveEpisode : null,
       normalizedVideoParams
     );
 
@@ -912,9 +1068,6 @@ async function generateDynamicSubtitle(
       return null;
     }
 
-    // Build candidate pairs for this title; we'll start by trying the
-    // exact pair encoded in the URL (the one subtitlesHandler picked),
-    // then fall back to other candidates if the match rate is too low.
     const candidatePairs = generateCandidatePairs(allSubtitles, mainLang, transLang);
 
     const requestedMain = allSubtitles.find(s => String(s.id) === String(mainSubId));
@@ -922,8 +1075,6 @@ async function generateDynamicSubtitle(
 
     let orderedPairs = candidatePairs;
     if (requestedMain && requestedTrans) {
-      // Move the URL-requested pair to the front (or insert it if it
-      // wasn't in the candidate list, e.g. addon was upgraded mid-cache).
       const isSameGroup =
         requestedMain.g === requestedTrans.g && requestedMain.g != null;
       const head = {
@@ -976,6 +1127,8 @@ module.exports = {
   subtitleCache,
   subtitlesHandler,
   generateDynamicSubtitle,
+  resolveMediaId,
+  fetchArmMapping,
   // Exported for testing
   _test: {
     parseTimeToMs,
@@ -986,6 +1139,8 @@ module.exports = {
     joinSubtitleLines,
     formatSrt,
     formatSrtSimple,
-    msToSrtTime
+    msToSrtTime,
+    resolveMediaId,
+    fetchArmMapping
   }
 };
