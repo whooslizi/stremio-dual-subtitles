@@ -2,7 +2,15 @@
   "version": 2,
   "functions": {
     "api/index.js": {
-      "includeFiles": "scrapers/**,lib/**,*.js"
+      "includeFiles": [
+        "scrapers/**",
+        "lib/**",
+        "addon.js",
+        "server.js",
+        "encoding.js",
+        "languages.js",
+        "landingTemplate.js"
+      ]
     }
   },
   "rewrites": [
