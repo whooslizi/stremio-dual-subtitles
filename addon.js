@@ -12,7 +12,7 @@ const {
 } = require('./languages');
 const { alignAndMatch } = require('./lib/syncEngine');
 const { generateCandidatePairs, filterByLanguage } = require('./lib/sourceSelection');
-const { scrapeAllSources, generateSelectableDualPairs } = require('./scrapers');
+const { scrapeAllSources, generateSelectableDualPairs } = require('./scrapers/index');
 const { singleflight } = require('./lib/singleflight');
 const { translateSubtitleCues, isTranslationEnabled } = require('./lib/translator');
 

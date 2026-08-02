@@ -882,7 +882,7 @@ test('resolveMediaId: resolves MAL ID to IMDb ID via ARM API', async () => {
 // ============================================================================
 console.log('\n--- Multi-Source Scrapers ---');
 
-const { generateSelectableDualPairs } = require('./scrapers');
+const { generateSelectableDualPairs } = require('./scrapers/index');
 
 test('scrapers: generateSelectableDualPairs creates distinct user-selectable options', () => {
   const dummySubs = [
