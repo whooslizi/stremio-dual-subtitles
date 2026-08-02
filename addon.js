@@ -825,8 +825,12 @@ async function generateDynamicSubtitle(
         if (content) {
           const parsed = parseSrt(content);
           if (parsed?.length) {
-            const merged = mergeSubtitles(parsed, [], { ...mergeOptions, mainLang: subLang });
-            const fallbackSrt = formatSrt(merged);
+            let autoTrans = null;
+            if (isTranslationEnabled()) {
+              autoTrans = await translateSubtitleCues(parsed, mainLang, transLang);
+            }
+            const merged = mergeSubtitles(parsed, autoTrans || [], { ...mergeOptions, mainLang: subLang, transLang });
+            const fallbackSrt = formatSrtSimple(merged, mainLang, transLang);
             if (fallbackSrt) {
               storeSubtitle(cacheKey, fallbackSrt);
               return fallbackSrt;
